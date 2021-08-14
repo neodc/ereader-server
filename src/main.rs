@@ -248,13 +248,14 @@ async fn handle_connection(state: SharedState, mut state_update_channel: Receive
 		tokio::select! {
             msg = ws_receiver.next() => {
                 match msg {
+					Some(Ok(Message::Close(_))) => break,
                     Some(msg) => {
                         let msg = msg?;
 						match serde_json::from_str::<ClientAction>(msg.to_text()?) {
 							Ok(action) => {
 								client_action_channel.send(action).unwrap();
 							}
-							_ => println!("Unknown action found: {}", msg),
+							_ => println!("Unknown action found: {:?}", msg),
 						}
                     }
                     None => break,
