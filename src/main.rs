@@ -19,6 +19,8 @@ use mpd_client::commands::responses::{PlayState, self};
 use mpd_client::commands::{AlbumArt, AlbumArtEmbedded};
 use std::env::var_os;
 use tokio::join;
+use tokio::time::{sleep, Duration};
+use anyhow::{Result, Context, bail};
 
 struct MpdConfig {
 	host: String,
@@ -86,31 +88,41 @@ impl Offsetable for AlbumArtEmbedded {
 	}
 }
 
-async fn keep_state_updated(config: MpdConfig, state: SharedState, state_update_channel: Sender<()>, mut client_action_channel: UnboundedReceiver<ClientAction>) {
-	let connection = TcpStream::connect(&config.host).await.expect("Can't connect to mpd host");
+async fn keep_state_updated_loop(config: MpdConfig, state: SharedState, state_update_channel: Sender<()>, mut client_action_channel: UnboundedReceiver<ClientAction>) {
+	loop {
+		let err = keep_state_updated(&config, state.clone(), state_update_channel.clone(), &mut client_action_channel).await;
+		eprintln!("An error occured in the keep_state_updated function: {:?}", err);
+		sleep(Duration::from_secs(10)).await;
+	}
+}
 
-	let (client, mut state_changes) = Client::connect(connection).await.unwrap();
+async fn keep_state_updated(config: &MpdConfig, state: SharedState, state_update_channel: Sender<()>, client_action_channel: &mut UnboundedReceiver<ClientAction>) -> Result<()> {
+	let connection = TcpStream::connect(&config.host).await.context("Can't connect to mpd host")?;
 
-	client.password(config.password.clone()).await.unwrap();
+	let (client, mut state_changes) = Client::connect(connection).await.context("Can't connect to mpd protocol")?;
+
+	client.password(config.password.clone()).await.context("Can't send password")?;
 
 	println!("Connected to mpd");
 
-	update_state(state.clone(), &client).await;
-	state_update_channel.send(()).unwrap();
+	update_state(state.clone(), &client).await.context("Can't update state (first)")?;
+	state_update_channel.send(()).context("Can't send message on \"state_update_channel\" channel (first)")?;
 
 	loop {
 		tokio::select! {
 			state_change = state_changes.next() => {
-				match state_change.transpose().unwrap() {
+				match state_change.transpose().context("Got error in state_change")? {
 					// something relevant changed
 					Some(Subsystem::Player) => {
-						update_state(state.clone(), &client).await;
-						state_update_channel.send(()).unwrap();
+						update_state(state.clone(), &client).await.context("Can't update state on state_change")?;
+						state_update_channel.send(()).context("Can't send message on \"state_update_channel\" channel on state_change")?;
 					},
 					// something changed but we don't care
 					Some(_) => (),
 					// connection was closed by the server
-					None => (),
+					None => {
+						bail!("Mpd connection was closed by the server");
+					},
 				}
 			}
 			action = client_action_channel.recv() => {
@@ -123,25 +135,25 @@ async fn keep_state_updated(config: MpdConfig, state: SharedState, state_update_
 						ClientAction::Select {position} => client.command(commands::Play::song(commands::SongPosition(position))).await,
 					};
 
-					command.unwrap();
+					command.with_context(|| format!("Can't send command on action: {:?}", action))?;
 
-					update_state(state.clone(), &client).await;
-					state_update_channel.send(()).unwrap();
+					update_state(state.clone(), &client).await.context("Can't update state on state_change on action")?;
+					state_update_channel.send(()).context("Can't send message on \"state_update_channel\" channel on action")?;
 				}
 			}
 		}
 	}
 }
 
-async fn update_state(state: SharedState, client: &Client) {
+async fn update_state(state: SharedState, client: &Client) -> Result<()> {
 	let (status, queue, current_song) = join!(
 		client.command(commands::Status),
 		client.command(commands::Queue),
 		client.command(commands::CurrentSong),
 	);
 
-	let status = status.unwrap();
-	let queue = queue.unwrap();
+	let status = status.context("Got error status")?;
+	let queue = queue.context("Got error queue")?;
 
 	let picture = if let Ok(Some(current_song)) = current_song {
 		get_song_picture(client, state.clone(), current_song.song.url.to_string()).await
@@ -169,6 +181,8 @@ async fn update_state(state: SharedState, client: &Client) {
 		state.queue = songs;
 		state.picture = picture;
 	}
+
+	Ok(())
 }
 
 async fn get_song_picture(client: &Client, state: SharedState, uri: String) -> Option<Picture> {
@@ -283,7 +297,7 @@ async fn main() -> Result<(), IoError> {
 	let (state_update_tx, _state_update_rx) = channel(1);
 	let (client_actions_tx, client_actions_rx) = unbounded_channel();
 
-	tokio::spawn(keep_state_updated(mpd_config, state.clone(), state_update_tx.clone(), client_actions_rx));
+	tokio::spawn(keep_state_updated_loop(mpd_config, state.clone(), state_update_tx.clone(), client_actions_rx));
 
 	// Create the event loop and TCP listener we'll accept connections on.
 	let try_socket = TcpListener::bind(&addr).await;
