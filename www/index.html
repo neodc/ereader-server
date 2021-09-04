@@ -84,8 +84,6 @@
 
 		.playlist th:first-of-type, .playlist td:first-of-type {
 			border-left: 0;
-			width: 1.65em;
-			text-align: center;
 		}
 
 		.playlist th:last-of-type, .playlist td:last-of-type {
@@ -98,6 +96,11 @@
 			white-space: nowrap;
 			text-overflow: ellipsis;
 			overflow: hidden;
+		}
+
+		.playlist .active {
+			background-color: black;
+			color: white;
 		}
 
 	</style>
@@ -131,21 +134,18 @@
 			<table>
 				<thead>
 				<tr>
-					<th></th>
 					<th>Titre</th>
 					<th>Artiste</th>
 				</tr>
 				</thead>
 				<tbody>
-				<tr v-for="line in visiblePlaylist" @click="setSong(line)">
-					<td><i v-if="line.position === mpd_state.current_position">▶</i></td>
+				<tr v-for="line in visiblePlaylist" @click="setSong(line)" :class="{active: line.position === mpd_state.current_position}">
 					<td v-text="line.title"></td>
 					<td v-text="line.artist"></td>
 				</tr>
 				</tbody>
 				<tfoot>
 				<tr>
-					<th></th>
 					<th>Titre</th>
 					<th>Artist</th>
 				</tr>
